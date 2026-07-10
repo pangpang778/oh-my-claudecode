@@ -41,16 +41,26 @@ export function slugifyMergeReadiness(input: string): string {
   return slug || "change";
 }
 
-function runGit(directory: string, args: string[]): string {
+function runGit(directory: string, args: string[]): { stdout: string; error?: string } {
   try {
-    return execFileSync("git", args, {
+    const stdout = execFileSync("git", args, {
       cwd: directory,
       encoding: "utf-8",
-      stdio: ["ignore", "pipe", "ignore"],
+      stdio: ["ignore", "pipe", "pipe"],
       windowsHide: true,
-    }).trim();
-  } catch {
-    return "";
+      timeout: 10000,
+      maxBuffer: 10 * 1024 * 1024,
+    });
+    return { stdout: stdout.trim() };
+  } catch (e) {
+    const err = e as NodeJS.ErrnoException & { status?: number; stderr?: string };
+    const timedOut = err?.code === "ETIMEDOUT" || /timed out/i.test(String(err?.message || ""));
+    const stderr = typeof err?.stderr === "string" ? err.stderr.trim().slice(0, 200) : "";
+    const exit = err?.status;
+    const error = timedOut
+      ? `git ${args[0]} timed out (>10s)`
+      : `git ${args[0]} failed (exit ${exit ?? "?"})${stderr ? ": " + stderr : ""}`;
+    return { stdout: "", error };
   }
 }
 
@@ -88,31 +98,40 @@ function listArtifactFiles(directory: string): string[] {
 
 export function collectMergeReadinessEvidence(directory: string): MergeReadinessEvidence {
   const worktree = resolveToWorktreeRoot(directory);
-  const changedFiles = runGit(worktree, ["diff", "--name-only", "HEAD"])
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean);
-  const stagedFiles = runGit(worktree, ["diff", "--cached", "--name-only"])
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean);
-  const untrackedFiles = runGit(worktree, ["ls-files", "--others", "--exclude-standard"])
-    .split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
-  const committedBase = ["origin/main", "origin/dev", "origin/master", "upstream/main", "upstream/dev"]
-    .map((ref) => runGit(worktree, ["merge-base", ref, "HEAD"]))
-    .find((base) => /^[0-9a-f]{7,40}$/.test(base || ""));
-  const committedFiles = committedBase
-    ? runGit(worktree, ["diff", "--name-only", committedBase + "...HEAD"]).split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
-    : [];
+  const gitErrors: string[] = [];
+  const git = (args: string[]): string => {
+    const r = runGit(worktree, args);
+    if (r.error) gitErrors.push(r.error);
+    return r.stdout;
+  };
+  const changedFiles = git(["diff", "--name-only", "HEAD"]).split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  const stagedFiles = git(["diff", "--cached", "--name-only"]).split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  const untrackedFiles = git(["ls-files", "--others", "--exclude-standard"]).split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  const headRef = git(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]);
+  const candidateRefs = headRef
+    ? Array.from(new Set([headRef, "origin/main", "origin/dev", "origin/master", "upstream/main", "upstream/dev"]))
+    : ["origin/main", "origin/dev", "origin/master", "upstream/main", "upstream/dev"];
+  let committedBase = "";
+  let committedFiles: string[] = [];
+  let bestCount = Number.POSITIVE_INFINITY;
+  for (const ref of candidateRefs) {
+    const base = git(["merge-base", ref, "HEAD"]);
+    if (!/^[0-9a-f]{7,40}$/.test(base || "")) continue;
+    const files = git(["diff", "--name-only", base + "...HEAD"]).split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+    if (files.length > 0 && files.length < bestCount) {
+      bestCount = files.length;
+      committedBase = base;
+      committedFiles = files;
+    }
+  }
   const allChangedFiles = Array.from(new Set([...changedFiles, ...stagedFiles, ...untrackedFiles, ...committedFiles])).sort();
-  const status = runGit(worktree, ["status", "--short"]);
-  const diffStat = runGit(worktree, ["diff", "--stat", "HEAD"]) || (committedBase ? runGit(worktree, ["diff", "--stat", committedBase + "...HEAD"]) : "") || runGit(worktree, ["diff", "--cached", "--stat"]);
+  const status = git(["status", "--short"]);
+  const diffStat = git(["diff", "--stat", "HEAD"]) || (committedBase ? git(["diff", "--stat", committedBase + "...HEAD"]) : "") || git(["diff", "--cached", "--stat"]);
   const sourceArtifacts = listArtifactFiles(worktree);
   const evidenceText = sourceArtifacts.join("\n").toLowerCase();
   const testEvidence = sourceArtifacts.filter((file) => /test|spec|qa|verify|validation/i.test(file));
   const reviewEvidence = sourceArtifacts.filter((file) => /review|risk|security|readiness|verdict/i.test(file));
   const missingEvidence: string[] = [];
-
   if (allChangedFiles.length === 0 && !status) {
     missingEvidence.push("No changed files or git status evidence were detected.");
   }
@@ -125,16 +144,8 @@ export function collectMergeReadinessEvidence(directory: string): MergeReadiness
   if (!/review|risk|security|verdict/.test(evidenceText)) {
     missingEvidence.push("No review or risk artifact was detected under .omc.");
   }
-
-  return {
-    changedFiles: allChangedFiles,
-    status,
-    diffStat,
-    sourceArtifacts,
-    testEvidence,
-    reviewEvidence,
-    missingEvidence,
-  };
+  for (const gerr of gitErrors) missingEvidence.push(gerr);
+  return { changedFiles: allChangedFiles, status, diffStat, sourceArtifacts, testEvidence, reviewEvidence, missingEvidence };
 }
 
 function extractChangeSummary(promptText: string): string {
@@ -146,7 +157,7 @@ function extractChangeSummary(promptText: string): string {
 
 /** True when the collected evidence lacks the minimal diff/change signal needed to quiz on. */
 function hasMinimalEvidence(evidence: MergeReadinessEvidence): boolean {
-  return evidence.changedFiles.length > 0 || Boolean(evidence.status) || Boolean(evidence.diffStat);
+  return evidence.changedFiles.length > 0 || Boolean(evidence.status) || Boolean(evidence.diffStat) || evidence.sourceArtifacts.length > 0;
 }
 
 /** Pick the next unanswered MCQ from state.questions, preferring required dimensions first. */
@@ -366,6 +377,13 @@ export function setMergeReadinessContent(
     state.validation_errors = errors;
     state.awaiting_content = true;
     state.phase = "artifact";
+    state.answers = [];
+    state.readiness_score = 0;
+    state.dimension_scores = {};
+    state.result = "pending";
+    delete state.pending_question;
+    delete state.completed_at;
+    delete state.override_reason;
     state.updated_at = now;
     writeArtifactForState(workingDir, state);
     writeMergeReadinessState(workingDir, state, sessionId);
@@ -408,6 +426,7 @@ export function recordMergeReadinessMCQAnswer(
   const workingDir = resolveToWorktreeRoot(directory);
   const state = readMergeReadinessState(workingDir, sessionId);
   if (!state?.active) return state ?? null;
+  if (state.awaiting_content || state.phase !== "questioning") return null;
   const question = state.questions.find((q) => q.id === questionId);
   if (!question || state.pending_question?.id !== questionId) return null;
   const normalizedOptionId = selectedOptionId.trim();

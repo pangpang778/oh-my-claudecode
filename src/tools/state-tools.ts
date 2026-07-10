@@ -46,11 +46,19 @@ import { createInitialMergeReadinessState, setMergeReadinessContent, recordMerge
 // are first-class modes with dedicated MODE_CONFIGS entries; ralplan remains an
 // extra state-only mode handled via the registry-fallback path).
 const EXECUTION_MODES: [string, ...string[]] = [
-  'autopilot', 'autoresearch', 'team', 'ralph', 'ultrawork', 'ultraqa', 'deep-interview', 'merge-readiness', 'self-improve'
+  'autopilot', 'autoresearch', 'team', 'ralph', 'ultrawork', 'ultraqa', 'deep-interview', 'self-improve'
 ];
 
-// Extended type for state tools - includes state-bearing modes outside mode-registry
+// merge-readiness is read/clear-eligible (state_read/status/clear + /cancel work) but NOT write-eligible.
 const STATE_TOOL_MODES: [string, ...string[]] = [
+  ...EXECUTION_MODES,
+  'ralplan',
+  'omc-teams',
+  'skill-active',
+  'merge-readiness'
+];
+// Modes that may be generically written via state_write. Excludes merge-readiness (runtime-owned).
+const STATE_WRITE_MODES: [string, ...string[]] = [
   ...EXECUTION_MODES,
   'ralplan',
   'omc-teams',
@@ -732,7 +740,7 @@ export const stateReadTool: ToolDefinition<{
 // ============================================================================
 
 export const stateWriteTool: ToolDefinition<{
-  mode: z.ZodEnum<typeof STATE_TOOL_MODES>;
+  mode: z.ZodEnum<typeof STATE_WRITE_MODES>;
   active: z.ZodOptional<z.ZodBoolean>;
   iteration: z.ZodOptional<z.ZodNumber>;
   max_iterations: z.ZodOptional<z.ZodNumber>;
@@ -750,7 +758,7 @@ export const stateWriteTool: ToolDefinition<{
   description: 'Write/update state for a specific mode. Creates the state file and directories if they do not exist. Common fields (active, iteration, phase, etc.) can be set directly as parameters. Additional custom fields can be passed via the optional `state` parameter. Note: swarm uses SQLite and cannot be written via this tool.',
   annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   schema: {
-    mode: z.enum(STATE_TOOL_MODES).describe('The mode to write state for'),
+    mode: z.enum(STATE_WRITE_MODES).describe('The mode to write state for'),
     active: z.boolean().optional().describe('Whether the mode is currently active'),
     iteration: z.number().optional().describe('Current iteration number'),
     max_iterations: z.number().optional().describe('Maximum iterations allowed'),
@@ -1655,7 +1663,8 @@ export const stateTools = [
     },
     handler: async (args: { summary: string; workingDirectory?: string; session_id?: string }) => {
       const directory = validateWorkingDirectory(args.workingDirectory || process.cwd());
-      const state = createInitialMergeReadinessState(directory, args.summary, args.session_id);
+      const sessionId = args.session_id ?? resolveSessionId({ context: "cli" });
+      const state = createInitialMergeReadinessState(directory, args.summary, sessionId);
       const blocked = state.result === 'blocked';
       return { content: [{ type: 'text' as const, text: blocked ? `Merge-readiness blocked: ${state.validation_errors?.join(' ') ?? 'missing evidence'}` : `Merge-readiness started (profile: ${state.profile}, threshold: ${state.threshold}, max rounds: ${state.max_rounds}). Awaiting content via merge_readiness_set_content.` }], ...(blocked ? { isError: true } : {}) };
     },
@@ -1663,7 +1672,7 @@ export const stateTools = [
   {
     name: 'merge_readiness_set_content',
     description: 'Validate and submit the five-section merge-readiness report and objective MCQs. Requires an active gate (call merge_readiness_start first).',
-    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     schema: {
       why: z.string().max(10000), whatChanged: z.string().max(10000), tradeoffs: z.string().max(10000), risksConsidered: z.string().max(10000), teamUnderstanding: z.string().max(10000),
       questions: z.array(z.object({ id: z.string().max(100), dimension: z.enum(['why', 'change', 'tradeoff', 'risk', 'team']), stem: z.string().max(2000), options: z.array(z.object({ id: z.string().max(100), text: z.string().max(1000) })).max(8), correctOptionId: z.string().max(100), rationale: z.string().max(2000).optional() })).max(8),
@@ -1671,7 +1680,8 @@ export const stateTools = [
     },
     handler: async (args: { why: string; whatChanged: string; tradeoffs: string; risksConsidered: string; teamUnderstanding: string; questions: Array<any>; workingDirectory?: string; session_id?: string }) => {
       const directory = validateWorkingDirectory(args.workingDirectory || process.cwd());
-      const state = setMergeReadinessContent(directory, args, args.session_id);
+      const sessionId = args.session_id ?? resolveSessionId({ context: "cli" });
+      const state = setMergeReadinessContent(directory, args, sessionId);
       if (!state) {
         return { content: [{ type: 'text' as const, text: 'Merge-readiness content rejected: no active gate. Call merge_readiness_start first.' }], isError: true };
       }
@@ -1690,7 +1700,8 @@ export const stateTools = [
     },
     handler: async (args: { questionId: string; optionId: string; workingDirectory?: string; session_id?: string }) => {
       const directory = validateWorkingDirectory(args.workingDirectory || process.cwd());
-      const state = recordMergeReadinessMCQAnswer(directory, args.questionId, args.optionId, args.session_id);
+      const sessionId = args.session_id ?? resolveSessionId({ context: "cli" });
+      const state = recordMergeReadinessMCQAnswer(directory, args.questionId, args.optionId, sessionId);
       if (!state) {
         return { content: [{ type: 'text' as const, text: 'Merge-readiness answer rejected: no active gate, or the questionId/optionId does not match the current MCQ.' }], isError: true };
       }
