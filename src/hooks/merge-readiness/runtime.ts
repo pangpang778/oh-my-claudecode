@@ -98,9 +98,15 @@ export function collectMergeReadinessEvidence(directory: string): MergeReadiness
     .filter(Boolean);
   const untrackedFiles = runGit(worktree, ["ls-files", "--others", "--exclude-standard"])
     .split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
-  const allChangedFiles = Array.from(new Set([...changedFiles, ...stagedFiles, ...untrackedFiles])).sort();
+  const committedBase = ["origin/main", "origin/dev", "origin/master", "upstream/main", "upstream/dev"]
+    .map((ref) => runGit(worktree, ["merge-base", ref, "HEAD"]))
+    .find((base) => /^[0-9a-f]{7,40}$/.test(base || ""));
+  const committedFiles = committedBase
+    ? runGit(worktree, ["diff", "--name-only", committedBase + "...HEAD"]).split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
+    : [];
+  const allChangedFiles = Array.from(new Set([...changedFiles, ...stagedFiles, ...untrackedFiles, ...committedFiles])).sort();
   const status = runGit(worktree, ["status", "--short"]);
-  const diffStat = runGit(worktree, ["diff", "--stat", "HEAD"]) || runGit(worktree, ["diff", "--cached", "--stat"]);
+  const diffStat = runGit(worktree, ["diff", "--stat", "HEAD"]) || (committedBase ? runGit(worktree, ["diff", "--stat", committedBase + "...HEAD"]) : "") || runGit(worktree, ["diff", "--cached", "--stat"]);
   const sourceArtifacts = listArtifactFiles(worktree);
   const evidenceText = sourceArtifacts.join("\n").toLowerCase();
   const testEvidence = sourceArtifacts.filter((file) => /test|spec|qa|verify|validation/i.test(file));
@@ -372,6 +378,13 @@ export function setMergeReadinessContent(
   state.teamUnderstanding = content.teamUnderstanding.trim();
   // Cap generated questions at the profile max rounds.
   state.questions = content.questions.slice(0, state.max_rounds);
+  // Re-submitted content starts a fresh quiz: clear prior answers, score, and terminal result.
+  state.answers = [];
+  state.readiness_score = 0;
+  state.dimension_scores = {};
+  state.result = "pending";
+  delete state.completed_at;
+  delete state.override_reason;
   delete state.validation_errors;
   state.awaiting_content = false;
   state.phase = "questioning";
@@ -396,9 +409,9 @@ export function recordMergeReadinessMCQAnswer(
   const state = readMergeReadinessState(workingDir, sessionId);
   if (!state?.active) return state ?? null;
   const question = state.questions.find((q) => q.id === questionId);
-  if (!question || state.pending_question?.id !== questionId) return state;
+  if (!question || state.pending_question?.id !== questionId) return null;
   const normalizedOptionId = selectedOptionId.trim();
-  if (!question.options.some((option) => option.id === normalizedOptionId)) return state;
+  if (!question.options.some((option) => option.id === normalizedOptionId)) return null;
   const now = new Date().toISOString();
   const isCorrect = scoreMCQResponse(question, normalizedOptionId);
   // Replace any prior answer to the same question (idempotent re-answer).

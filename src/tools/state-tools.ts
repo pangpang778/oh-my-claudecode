@@ -46,7 +46,7 @@ import { createInitialMergeReadinessState, setMergeReadinessContent, recordMerge
 // are first-class modes with dedicated MODE_CONFIGS entries; ralplan remains an
 // extra state-only mode handled via the registry-fallback path).
 const EXECUTION_MODES: [string, ...string[]] = [
-  'autopilot', 'autoresearch', 'team', 'ralph', 'ultrawork', 'ultraqa', 'deep-interview', 'self-improve'
+  'autopilot', 'autoresearch', 'team', 'ralph', 'ultrawork', 'ultraqa', 'deep-interview', 'merge-readiness', 'self-improve'
 ];
 
 // Extended type for state tools - includes state-bearing modes outside mode-registry
@@ -1692,7 +1692,7 @@ export const stateTools = [
       const directory = validateWorkingDirectory(args.workingDirectory || process.cwd());
       const state = recordMergeReadinessMCQAnswer(directory, args.questionId, args.optionId, args.session_id);
       if (!state) {
-        return { content: [{ type: 'text' as const, text: 'Merge-readiness answer rejected: no active gate. Call merge_readiness_start first.' }], isError: true };
+        return { content: [{ type: 'text' as const, text: 'Merge-readiness answer rejected: no active gate, or the questionId/optionId does not match the current MCQ.' }], isError: true };
       }
       const result = state.result;
       const score = state.readiness_score;

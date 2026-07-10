@@ -39,7 +39,7 @@ If no flag is provided, use **Standard**. Thresholds and round counts are canoni
 - This is a post-task command. Do not implement code inside this mode.
 - Gather repository and artifact evidence before asking the human for facts that can be discovered locally.
 - Generate the explanation doc + MCQs in one AI step, then present MCQs one-per-round.
-- The runtime (TS hook code) is the backbone: it owns validation, state, objective MCQ scoring, the Stop-hook gate, and the durable artifact. The AI owns content generation + MCQ presentation via AskUserQuestion.
+- The runtime (TS hook code) is the backbone: it owns validation, state, objective MCQ scoring, and the durable artifact. The AI owns content generation + MCQ presentation via AskUserQuestion.
 - Present each MCQ one-per-round via AskUserQuestion (deep-interview style). Record each selection via the runtime so it is scored objectively.
 - Ask about explainability, not implementation trivia.
 - Never ask the human to memorize line numbers, variable names, private helper names, or incidental implementation details.
@@ -48,7 +48,7 @@ If no flag is provided, use **Standard**. Thresholds and round counts are canoni
 - If key evidence is missing (no diff/change signal), mark result `blocked`.
 - Passing this gate does not approve merge, replace tests, replace review, replace security review, accept risk, or bypass maintainer approval.
 - Persist state for resume safety under `.omc/state/merge-readiness-state.json` (session-scoped under `.omc/state/sessions/<sessionId>/`). Do not write this file directly.
-- git hook hard gate (pre-merge / branch protection) is deferred to v2. v1 gate is session-internal (Stop-hook block + artifact).
+- v1 is advisory: the runtime scores the quiz and writes a durable artifact, but does NOT block the Stop hook. Stop-hook enforcement and the git pre-merge hard gate are deferred to follow-up work.
 </Execution_Policy>
 
 <Steps>
