@@ -189,4 +189,25 @@ describe("merge-readiness standalone tool flow", () => {
     expect(textOf(resubmit)).toContain("Paused");
     expect(readMergeReadinessState(tempDir, session)?.result).toBe("paused");
   });
+
+  it("state_clear without session_id only cancels the caller's session", async () => {
+    const start = findTool("merge_readiness_start");
+    const clear = findTool("state_clear");
+    // Start active gates in two distinct sessions.
+    await start.handler({ summary: "/merge-readiness --quick change", workingDirectory: tempDir, session_id: "sess-A" });
+    await start.handler({ summary: "/merge-readiness --quick change", workingDirectory: tempDir, session_id: "sess-B" });
+    expect(readMergeReadinessState(tempDir, "sess-A")?.active).toBe(true);
+    expect(readMergeReadinessState(tempDir, "sess-B")?.active).toBe(true);
+    // Clear with no session_id, caller resolved from env = sess-A.
+    const prevSid = process.env.CLAUDE_SESSION_ID;
+    process.env.CLAUDE_SESSION_ID = "sess-A";
+    try {
+      await clear.handler({ mode: "merge-readiness", workingDirectory: tempDir });
+    } finally {
+      if (prevSid === undefined) delete process.env.CLAUDE_SESSION_ID; else process.env.CLAUDE_SESSION_ID = prevSid;
+    }
+    // sess-A cancelled, sess-B untouched (no cross-session clear).
+    expect(readMergeReadinessState(tempDir, "sess-A")?.result).toBe("cancelled");
+    expect(readMergeReadinessState(tempDir, "sess-B")?.active).toBe(true);
+  });
 });

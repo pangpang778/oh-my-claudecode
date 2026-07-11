@@ -23664,7 +23664,12 @@ function createInitialMergeReadinessState(directory, promptText, sessionId, base
   if (missingEvidence) {
     state.validation_errors = unsupportedFromPr ? ["--from-pr is unsupported: merge-readiness uses local git and .omc evidence only."] : sourceModeResult.error ? [sourceModeResult.error] : ["No minimal evidence for the selected source mode was detected; produce it before running /merge-readiness."];
   }
-  const prior = readMergeReadinessState(directory, sessionId);
+  let prior = null;
+  try {
+    prior = readMergeReadinessState(directory, sessionId);
+  } catch {
+    prior = null;
+  }
   if (prior && prior.result !== "pending" && prior.completed_at) {
     state.prior_attempts = [
       ...prior.prior_attempts ?? [],

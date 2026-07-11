@@ -1,5 +1,5 @@
 import { execFileSync } from "child_process";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -200,6 +200,87 @@ describe("merge-readiness runtime", () => {
     expect(state?.validation_errors?.some((e) => e.includes("change"))).toBe(true);
     expect(state?.phase).toBe("content");
     expect(state?.result).toBe("pending");
+  });
+
+  it("does not start the gate on an unrelated artifact (fail-open fix)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "omc-mr-unrelated-"));
+    try {
+      execFileSync("git", ["init"], { cwd: dir, stdio: "ignore", windowsHide: true });
+      execFileSync("git", ["config", "user.email", "t@e.com"], { cwd: dir, stdio: "ignore", windowsHide: true });
+      execFileSync("git", ["config", "user.name", "T"], { cwd: dir, stdio: "ignore", windowsHide: true });
+      writeFileSync(join(dir, "README.md"), "x\n");
+      execFileSync("git", ["add", "."], { cwd: dir, stdio: "ignore", windowsHide: true });
+      execFileSync("git", ["commit", "-m", "init"], { cwd: dir, stdio: "ignore", windowsHide: true });
+      // Clean tree (no diff) + an unrelated plans file: must block, not start pending.
+      mkdirSync(join(dir, ".omc", "plans"), { recursive: true });
+      writeFileSync(join(dir, ".omc", "plans", "unrelated.md"), "notes\n");
+      const state = createInitialMergeReadinessState(dir, "/merge-readiness --standard change", sessionId);
+      expect(state.result).toBe("blocked");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("starts the gate on a specs-only repo (scan scope fix)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "omc-mr-specs-"));
+    try {
+      execFileSync("git", ["init"], { cwd: dir, stdio: "ignore", windowsHide: true });
+      execFileSync("git", ["config", "user.email", "t@e.com"], { cwd: dir, stdio: "ignore", windowsHide: true });
+      execFileSync("git", ["config", "user.name", "T"], { cwd: dir, stdio: "ignore", windowsHide: true });
+      writeFileSync(join(dir, "README.md"), "x\n");
+      execFileSync("git", ["add", "."], { cwd: dir, stdio: "ignore", windowsHide: true });
+      execFileSync("git", ["commit", "-m", "init"], { cwd: dir, stdio: "ignore", windowsHide: true });
+      // Clean tree + a specs file: specs is now scanned and matches the test-evidence regex.
+      mkdirSync(join(dir, ".omc", "specs"), { recursive: true });
+      writeFileSync(join(dir, ".omc", "specs", "design.md"), "spec for the change\n");
+      const state = createInitialMergeReadinessState(dir, "/merge-readiness --standard change", sessionId);
+      expect(state.result).toBe("pending");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("preserves prior terminal attempts across re-start (audit history)", () => {
+    createInitialMergeReadinessState(tempDir, "/merge-readiness --quick change", sessionId);
+    setMergeReadinessContent(tempDir, {
+      why: "w", whatChanged: "wc", tradeoffs: "t", risksConsidered: "r", teamUnderstanding: "tu",
+      questions: [makeQuestion("q1", "why"), makeQuestion("q2", "change"), makeQuestion("q3", "risk")],
+    }, sessionId);
+    // Answer all wrong -> 0/3 = 0 < quick threshold 0.70 -> paused.
+    recordMergeReadinessMCQAnswer(tempDir, "q1", "b", sessionId);
+    recordMergeReadinessMCQAnswer(tempDir, "q2", "b", sessionId);
+    recordMergeReadinessMCQAnswer(tempDir, "q3", "b", sessionId);
+    expect(readMergeReadinessState(tempDir, sessionId)?.result).toBe("paused");
+    // Re-start should preserve the prior paused attempt in prior_attempts.
+    const state = createInitialMergeReadinessState(tempDir, "/merge-readiness --quick retry", sessionId);
+    expect(state.prior_attempts?.length).toBe(1);
+    expect(state.prior_attempts?.[0].result).toBe("paused");
+  });
+
+  it("fails closed when state cannot be persisted (invalid session id)", () => {
+    // tempDir has a diff, so without the persistence failure this would be pending.
+    const state = createInitialMergeReadinessState(tempDir, "/merge-readiness --quick change", "bad/session");
+    expect(state.result).toBe("blocked");
+    expect(state.validation_errors?.some((e) => e.includes("persisted"))).toBe(true);
+  });
+
+  it("blocked gate message directs to evidence, not content submission", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "omc-mr-blocked-msg-"));
+    try {
+      execFileSync("git", ["init"], { cwd: dir, stdio: "ignore", windowsHide: true });
+      execFileSync("git", ["config", "user.email", "t@e.com"], { cwd: dir, stdio: "ignore", windowsHide: true });
+      execFileSync("git", ["config", "user.name", "T"], { cwd: dir, stdio: "ignore", windowsHide: true });
+      writeFileSync(join(dir, "README.md"), "x\n");
+      execFileSync("git", ["add", "."], { cwd: dir, stdio: "ignore", windowsHide: true });
+      execFileSync("git", ["commit", "-m", "init"], { cwd: dir, stdio: "ignore", windowsHide: true });
+      // Clean tree, no artifacts -> blocked.
+      createInitialMergeReadinessState(dir, "/merge-readiness --standard change", sessionId);
+      const result = await checkMergeReadiness(sessionId, dir, false);
+      expect(result?.message).toContain("Minimal evidence");
+      expect(result?.message).not.toContain("setMergeReadinessContent");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it("blocks when minimal evidence is missing (no diff/change signal)", () => {

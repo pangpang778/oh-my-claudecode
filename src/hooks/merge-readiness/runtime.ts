@@ -332,7 +332,14 @@ export function createInitialMergeReadinessState(
         ? [sourceModeResult.error]
         : ["No minimal evidence for the selected source mode was detected; produce it before running /merge-readiness."];
   }
-  const prior = readMergeReadinessState(directory, sessionId);
+  let prior: MergeReadinessState | null = null;
+  try {
+    prior = readMergeReadinessState(directory, sessionId);
+  } catch {
+    // An invalid session id throws on the read path (validateSessionId); treat
+    // as no prior attempt. The write below will fail-closed on the same id.
+    prior = null;
+  }
   if (prior && prior.result !== "pending" && prior.completed_at) {
     state.prior_attempts = [
       ...(prior.prior_attempts ?? []),
