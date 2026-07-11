@@ -65,7 +65,7 @@ function runGit(directory: string, args: string[]): { stdout: string; error?: st
 
 function listArtifactFiles(directory: string): string[] {
   const root = getOmcRoot(directory);
-  const candidates = ["plans", "artifacts", "logs"]
+  const candidates = ["plans", "artifacts", "logs", "specs", "interviews"]
     .map((segment) => join(root, segment))
     .filter((path) => existsSync(path));
   const found: string[] = [];
@@ -162,7 +162,11 @@ function hasMinimalEvidenceForMode(evidence: MergeReadinessEvidence, mode: "diff
   const hasDiff = evidence.changedFiles.length > 0 || Boolean(evidence.diffStat);
   if (mode === "diff") return hasDiff;
   if (mode === "artifacts") return evidence.sourceArtifacts.length > 0;
-  return hasDiff || evidence.sourceArtifacts.length > 0;
+  // Default: an unrelated artifact (e.g. plans/notes.md) must not alone start
+  // the gate. Require a real diff or a test/review artifact, so the gate does
+  // not go pending on evidence that missingEvidence itself flags as absent.
+  const hasRelevantArtifact = evidence.testEvidence.length > 0 || evidence.reviewEvidence.length > 0;
+  return hasDiff || hasRelevantArtifact;
 }
 
 function pickNextQuestion(state: MergeReadinessState): MergeReadinessMCQQuestion | undefined {
@@ -269,8 +273,8 @@ export function writeMergeReadinessState(
   directory: string,
   state: MergeReadinessState,
   sessionId?: string,
-): void {
-  writeModeState(MODE, state as unknown as Record<string, unknown>, directory, sessionId);
+): boolean {
+  return writeModeState(MODE, state as unknown as Record<string, unknown>, directory, sessionId);
 }
 
 /**
@@ -305,7 +309,7 @@ export function createInitialMergeReadinessState(
     rounds: [],
     questions: [],
     answers: [],
-    awaiting_content: !unsupportedFromPr && !sourceModeResult.error,
+    awaiting_content: !missingEvidence,
     evidence,
     readiness_score: 0,
     dimension_scores: {},
@@ -328,7 +332,26 @@ export function createInitialMergeReadinessState(
         ? [sourceModeResult.error]
         : ["No minimal evidence for the selected source mode was detected; produce it before running /merge-readiness."];
   }
-  writeMergeReadinessState(directory, state, sessionId);
+  const prior = readMergeReadinessState(directory, sessionId);
+  if (prior && prior.result !== "pending" && prior.completed_at) {
+    state.prior_attempts = [
+      ...(prior.prior_attempts ?? []),
+      {
+        started_at: prior.started_at,
+        completed_at: prior.completed_at,
+        result: prior.result,
+        readiness_score: prior.readiness_score,
+        change_summary: prior.change_summary,
+      },
+    ];
+  }
+  const persisted = writeMergeReadinessState(directory, state, sessionId);
+  if (!persisted) {
+    state.result = "blocked";
+    state.awaiting_content = false;
+    state.phase = "complete";
+    state.validation_errors = ["Merge-readiness state could not be persisted (invalid session id or state path). Resolve the session id and re-run merge_readiness_start."];
+  }
   return state;
 }
 
@@ -356,12 +379,12 @@ export function setMergeReadinessContent(
   // Do not re-arm blocked or paused states: a blocked state lacks minimal
   // evidence, and a paused state failed the quiz. Both require a fresh
   // merge_readiness_start (which re-collects evidence) rather than a content
-  // re-submit. The refusal preserves the prior attempt's state until the
-  // operator re-runs start, which replaces it (v1 does not retain attempt history).
+  // re-submit. The prior attempt is appended to prior_attempts on re-start, so
+  // the audit history is retained across retries.
   if (state.result === "blocked" || state.result === "paused") {
     state.validation_errors ??= [state.result === "blocked"
       ? "Blocked: no minimal evidence for the selected source mode. Produce it before submitting content."
-      : "Paused: the quiz was not passed. Re-run merge_readiness_start to collect fresh evidence and retry (re-starting replaces the prior attempt's state)."];
+      : "Paused: the quiz was not passed. Re-run merge_readiness_start to collect fresh evidence and retry; the prior attempt is retained in the audit history."];
     if (state.result === "blocked") {
       state.awaiting_content = true;
       state.phase = "content";
@@ -534,6 +557,15 @@ export function formatMergeReadinessQuestionMessage(state: MergeReadinessState):
   const scoreLine = state.result === "pending"
     ? `Score: hidden until completion / threshold ${thresholdPct}%`
     : `Score: ${scorePct}% / threshold ${thresholdPct}%`;
+
+  if (state.result === "blocked") {
+    return [
+      "[MERGE READINESS BLOCKED]",
+      "Do not merge yet. Minimal evidence for the change is missing.",
+      "Produce the diff/test/review evidence under .omc, then re-run /merge-readiness (merge_readiness_start).",
+      ...(state.validation_errors ?? []),
+    ].join("\n");
+  }
 
   if (state.awaiting_content) {
     return [

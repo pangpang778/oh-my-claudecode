@@ -94,6 +94,16 @@ export interface MergeReadinessState {
   slug: string;
   /** Evidence source mode: --from-diff requires a diff; --from-artifacts accepts .omc artifacts. */
   source_mode?: "diff" | "artifacts";
+  /** Summaries of prior terminal attempts on this session, preserved across re-starts. */
+  prior_attempts?: MergeReadinessAttempt[];
+}
+
+export interface MergeReadinessAttempt {
+  started_at?: string;
+  completed_at?: string;
+  result: MergeReadinessResult;
+  readiness_score: number;
+  change_summary?: string;
 }
 
 export interface MergeReadinessPromptResult {

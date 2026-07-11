@@ -919,10 +919,12 @@ export const stateClearTool: ToolDefinition<{
           validateSessionId(sessionId);
           if (cancelActiveSession(sessionId)) cancelledSessions.push(sessionId);
         } else {
+          // Omitting session_id must not cross session boundaries: only cancel
+          // the caller's own session (resolved from env) and legacy state,
+          // never other sessions' active gates.
+          const callerSid = (process.env.CLAUDE_SESSION_ID && process.env.CLAUDE_SESSION_ID.trim()) || resolveSessionId({ context: "cli" });
+          if (callerSid && cancelActiveSession(callerSid)) cancelledSessions.push(callerSid);
           if (cancelActiveSession()) cancelledSessions.push('legacy');
-          for (const sid of listSessionIds(root)) {
-            if (cancelActiveSession(sid)) cancelledSessions.push(sid);
-          }
         }
         return {
           content: [{

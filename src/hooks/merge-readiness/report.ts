@@ -95,6 +95,11 @@ export function formatMergeReadinessReport(state: MergeReadinessState): string {
     "",
     "Dimension coverage:", "", dimensions || "_No scored dimensions yet._",
     "",
+    "",
+    state.prior_attempts && state.prior_attempts.length > 0
+      ? ["## Prior Attempts", "", ...state.prior_attempts.map((a, i) => "- Attempt " + (i + 1) + ": " + a.result + " (score " + Math.round((a.readiness_score ?? 0) * 100) + "%)" + (a.change_summary ? " - " + a.change_summary : ""))].join("\n")
+      : "",
+    "",
     "## Merge Boundary", "", MERGE_BOUNDARY_STATEMENT,
     "",
   ].filter((line, index, lines) => line !== "" || lines[index - 1] !== "").join("\n");
